@@ -6,7 +6,7 @@ Communicates via stdio (standard MCP transport).
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Optional
 
 from fastmcp import FastMCP
 

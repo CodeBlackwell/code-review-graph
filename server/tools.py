@@ -12,16 +12,12 @@ Exposes 7 tools:
 
 from __future__ import annotations
 
-import json
-import time
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .embeddings import EmbeddingStore, embed_all_nodes, semantic_search
 from .graph import GraphStore, edge_to_dict, node_to_dict
 from .incremental import (
-    collect_all_files,
     find_repo_root,
     full_build,
     get_changed_files,
@@ -402,7 +398,8 @@ def get_review_context(
         summary_parts = [
             f"Review context for {len(changed_files)} changed file(s):",
             f"  - {len(impact['changed_nodes'])} directly changed nodes",
-            f"  - {len(impact['impacted_nodes'])} impacted nodes in {len(impact['impacted_files'])} files",
+            f"  - {len(impact['impacted_nodes'])} impacted nodes"
+            f" in {len(impact['impacted_files'])} files",
             "",
             "Review guidance:",
             guidance,
@@ -491,7 +488,8 @@ def _generate_review_guidance(impact: dict, changed_files: list[str]) -> str:
     impacted_file_count = len(impact["impacted_files"])
     if impacted_file_count > 3:
         guidance_parts.append(
-            f"- Changes impact {impacted_file_count} other files. Consider splitting into smaller PRs."
+            f"- Changes impact {impacted_file_count} other files."
+            " Consider splitting into smaller PRs."
         )
 
     if not guidance_parts:

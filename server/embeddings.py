@@ -6,13 +6,12 @@ Falls back gracefully to keyword search when not installed.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import struct
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from .graph import GraphStore, GraphNode, node_to_dict
+from .graph import GraphNode, GraphStore, node_to_dict
 
 # Lazy imports for optional dependencies
 _model = None
@@ -24,8 +23,8 @@ def _check_available() -> bool:
     global _HAS_EMBEDDINGS
     if _HAS_EMBEDDINGS is None:
         try:
-            import sentence_transformers  # noqa: F401
             import numpy  # noqa: F401
+            import sentence_transformers  # noqa: F401
             _HAS_EMBEDDINGS = True
         except ImportError:
             _HAS_EMBEDDINGS = False

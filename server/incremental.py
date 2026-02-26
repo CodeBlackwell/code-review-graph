@@ -198,7 +198,7 @@ def find_dependents(store: GraphStore, file_path: str) -> list[str]:
 def full_build(repo_root: Path, store: GraphStore) -> dict:
     """Full rebuild of the entire graph."""
     parser = CodeParser()
-    ignore_patterns = _load_ignore_patterns(repo_root)
+    _load_ignore_patterns(repo_root)
     files = collect_all_files(repo_root)
 
     total_nodes = 0

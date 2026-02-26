@@ -1,34 +1,57 @@
 # code-review-graph
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
-[![MCP](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
-[![Tests](https://img.shields.io/badge/tests-30%2F30%20passing-brightgreen.svg)](#testing)
-
 **Persistent incremental knowledge graph for token-efficient, context-aware code reviews with Claude Code.**
 
-Stop re-scanning your entire codebase on every review. `code-review-graph` builds a structural graph of your code using Tree-sitter, tracks it incrementally, and gives Claude Code the context it needs to review only what changed — and everything affected by those changes.
+[![GitHub stars](https://img.shields.io/github/stars/tirth8205/code-review-graph?style=flat-square)](https://github.com/tirth8205/code-review-graph/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg)](https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg?style=flat-square)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![v1.1.0](https://img.shields.io/badge/version-1.1.0-purple.svg?style=flat-square)](#)
 
-## Why?
+---
+
+> It turns Claude from "smart but forgetful tourist" into "local expert who already knows the map."
+
+Stop re-scanning your entire codebase on every review. `code-review-graph` builds a structural graph of your code using Tree-sitter, tracks it incrementally, and gives Claude Code the context it needs to review only what changed — and everything affected by those changes.
 
 | Without graph | With graph |
 |---|---|
 | Full repo scan every review | Only changed + impacted files |
 | No blast-radius awareness | Automatic impact analysis |
-| Token-heavy (entire codebase) | 5-10x fewer tokens per review |
+| Token-heavy (entire codebase) | **5-10x fewer tokens** per review |
 | Manual "what else does this affect?" | Graph-powered dependency tracing |
 
-## Installation
+---
+
+## ✨ Features
+
+- **Incremental updates** — Only re-parses files that changed since last build. Subsequent updates take <2s.
+- **12+ languages** — Python, TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
+- **Blast-radius analysis** — See exactly which functions, classes, and files are impacted by any change
+- **Token-efficient reviews** — Send only changed + impacted code to the model, not your entire repo
+- **Auto-update hooks** — Graph stays current on every file edit and git commit
+- **Vector embeddings** — Optional semantic search across your codebase with sentence-transformers
+- **Watch mode** — Real-time graph updates as you code
+
+For the full feature list and changelog, see [docs/FEATURES.md](docs/FEATURES.md).
+
+---
+
+## 🚀 Quick Start
+
+**1. Install**
 
 ```bash
-# Clone and install
 git clone https://github.com/tirth8205/code-review-graph.git
 cd code-review-graph
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
-Then add to your Claude Code project's `.mcp.json`:
+**2. Connect to Claude Code**
+
+Add to your project's `.mcp.json`:
 
 ```json
 {
@@ -42,36 +65,22 @@ Then add to your Claude Code project's `.mcp.json`:
 }
 ```
 
-## Quickstart
-
-### 1. Build the graph (first time)
+**3. Build & review**
 
 ```
-/code-review-graph:build-graph
+/code-review-graph:build-graph    # Parse your codebase (~10s for 500 files)
+/code-review-graph:review-delta   # Review only what changed
+/code-review-graph:review-pr      # Full PR review with blast-radius
 ```
-
-This parses your entire codebase and creates the knowledge graph. Takes ~10s for a 500-file project.
-
-### 2. Review your changes
-
-```
-/code-review-graph:review-delta
-```
-
-Only reviews files changed since your last commit, plus everything impacted by those changes.
 
 **Before**: Claude reads 200 files, uses ~150k tokens.
 **After**: Claude reads 8 changed + 12 impacted files, uses ~25k tokens.
 
-### 3. Review a PR
+For detailed usage instructions, see [docs/USAGE.md](docs/USAGE.md).
 
-```
-/code-review-graph:review-pr
-```
+---
 
-Full structural review of a branch diff with blast-radius analysis, test coverage gaps, and actionable recommendations.
-
-## Architecture
+## 🛠️ How It Works
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -95,27 +104,36 @@ Full structural review of a branch diff with blast-radius analysis, test coverag
     └────────┘  └────────┘  └─────────────┘
 ```
 
-**Components**:
-- **Parser** (`server/parser.py`): Tree-sitter multi-language AST parser. Extracts structural nodes and relationships.
-- **Graph** (`server/graph.py`): SQLite-backed knowledge graph with NetworkX for traversal queries.
-- **Incremental** (`server/incremental.py`): Git-aware delta detection. Re-parses only changed files + their dependents.
-- **MCP Server** (`server/main.py`): Exposes 8 tools to Claude Code via the Model Context Protocol.
-- **Skills**: Three review workflows (`build-graph`, `review-delta`, `review-pr`).
-- **Hooks**: Auto-updates the graph on file edits and git commits.
-- **Token optimization**: `get_docs_section` tool serves only the exact section Claude needs from `references/LLM-OPTIMIZED-REFERENCE.md` — 90%+ token savings on usage questions.
+| Component | File | Role |
+|-----------|------|------|
+| **Parser** | `server/parser.py` | Tree-sitter multi-language AST parser. Extracts nodes and relationships. |
+| **Graph** | `server/graph.py` | SQLite-backed knowledge graph with NetworkX for traversal queries. |
+| **Incremental** | `server/incremental.py` | Git-aware delta detection. Re-parses only changed files + dependents. |
+| **MCP Server** | `server/main.py` | Exposes 8 tools to Claude Code via the Model Context Protocol. |
+| **Skills** | `skills/` | Three review workflows: `build-graph`, `review-delta`, `review-pr`. |
+| **Hooks** | `hooks/` | Auto-updates the graph on file edits and git commits. |
 
-## Full Documentation
+For the full architecture walkthrough, see [docs/architecture.md](docs/architecture.md).
 
-See the [docs/](docs/) folder:
-- [Usage Guide](docs/USAGE.md) — Installation and workflow
-- [Commands Reference](docs/COMMANDS.md) — All MCP tools, skills, and CLI commands
-- [Features & Changelog](docs/FEATURES.md) — What's included
-- [Architecture](docs/architecture.md) — System design and data flow
-- [Schema](docs/schema.md) — Graph node/edge types and SQLite tables
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — Common issues and fixes
-- [LLM-Optimized Reference](docs/LLM-OPTIMIZED-REFERENCE.md) — Token-optimized reference used by Claude Code
-- [Roadmap](docs/ROADMAP.md) — Planned features
-- [Legal & Privacy](docs/LEGAL.md)
+---
+
+## 📚 Deep Dive
+
+Everything beyond the quick start lives in the [docs/](docs/) folder. Start with [docs/USAGE.md](docs/USAGE.md) for the full workflow guide.
+
+| Document | What's inside |
+|----------|---------------|
+| [Usage Guide](docs/USAGE.md) | Installation, workflows, and tips |
+| [Commands Reference](docs/COMMANDS.md) | All MCP tools, skills, and CLI commands |
+| [Features & Changelog](docs/FEATURES.md) | What's included and what changed |
+| [Architecture](docs/architecture.md) | System design and data flow |
+| [Schema](docs/schema.md) | Graph node/edge types and SQLite tables |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and fixes |
+| [LLM-Optimized Reference](docs/LLM-OPTIMIZED-REFERENCE.md) | Token-optimized reference used by Claude Code |
+| [Roadmap](docs/ROADMAP.md) | Planned features |
+| [Legal & Privacy](docs/LEGAL.md) | License and data handling |
+
+---
 
 ## Graph Schema
 
@@ -141,6 +159,10 @@ See the [docs/](docs/) folder:
 | **TESTED_BY** | Function -> Test | Function has a test |
 | **DEPENDS_ON** | Node -> Node | General dependency |
 
+For the full schema documentation, see [docs/schema.md](docs/schema.md).
+
+---
+
 ## MCP Tools
 
 | Tool | Description |
@@ -149,8 +171,14 @@ See the [docs/](docs/) folder:
 | `get_impact_radius_tool` | Blast radius analysis for changed files |
 | `query_graph_tool` | Predefined relationship queries (callers, callees, tests, imports) |
 | `get_review_context_tool` | Token-optimized review context with source snippets |
-| `semantic_search_nodes_tool` | Search code entities by name/keyword |
+| `semantic_search_nodes_tool` | Search code entities by name/keyword/semantic similarity |
+| `embed_graph_tool` | Compute vector embeddings for semantic search |
 | `list_graph_stats_tool` | Graph statistics and health check |
+| `get_docs_section_tool` | Retrieve specific documentation sections (minimal tokens) |
+
+For usage details and examples, see [docs/COMMANDS.md](docs/COMMANDS.md).
+
+---
 
 ## Supported Languages
 
@@ -169,6 +197,8 @@ See the [docs/](docs/) folder:
 | PHP | `.php` | Full support |
 | C/C++ | `.c`, `.h`, `.cpp`, `.hpp` | Full support |
 
+---
+
 ## Configuration
 
 Create a `.code-review-graphignore` file in your repo root to exclude paths:
@@ -184,19 +214,48 @@ vendor/**
 third_party/**
 ```
 
-## Troubleshooting
+---
 
-### Database lock errors
-The graph uses SQLite with WAL mode. If you see lock errors, ensure only one build process runs at a time. The database auto-recovers.
+## 🧪 Testing
 
-### Large repositories (>10k files)
-First build may take 30-60 seconds. Subsequent incremental updates are fast (<2s). Consider adding more ignore patterns for generated/vendor code.
+```bash
+# Activate the virtual environment
+source .venv/bin/activate
 
-### Missing nodes after build
-Check that the file's language is supported and the file isn't in an ignore pattern. Run with `full_rebuild=True` to force a complete re-parse.
+# Run the full test suite
+pytest
 
-### Graph seems stale
-Hooks auto-update on edit/commit. If the graph is stale, run `/code-review-graph:build-graph` manually.
+# Run with verbose output
+pytest -v
+
+# Lint
+ruff check server/
+```
+
+47 tests covering parser, graph storage, MCP tools, and multi-language support (Go, Rust, Java).
+
+---
+
+## 🤝 Contributing
+
+### Adding a new language
+
+1. Add the extension mapping in `server/parser.py` → `EXTENSION_TO_LANGUAGE`
+2. Add node type mappings in `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES`, `_CALL_TYPES`
+3. Test with a sample file in that language
+4. Submit a PR
+
+### Development setup
+
+```bash
+git clone https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+---
 
 ## Comparison
 
@@ -211,28 +270,12 @@ Hooks auto-update on edit/commit. If the graph is stale, run `/code-review-graph
 | Multi-language | 12+ languages | Python only | Varies |
 | Token-efficient reviews | Yes | No | No |
 
-## Contributing
+---
 
-### Adding a new language
+## 📄 License
 
-1. Add the extension mapping in `server/parser.py` → `EXTENSION_TO_LANGUAGE`
-2. Add node type mappings in `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES`, `_CALL_TYPES`
-3. Test with a sample file in that language
-4. Submit a PR
+MIT — see [LICENSE](LICENSE) for details.
 
-### Development
+---
 
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Lint
-ruff check server/
-```
-
-## License
-
-MIT
+<p align="center">Built with ❤️ for better code reviews</p>

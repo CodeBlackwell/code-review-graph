@@ -14,7 +14,6 @@ from typing import Optional
 
 import tree_sitter_language_pack as tslp
 
-
 # ---------------------------------------------------------------------------
 # Data models for extracted entities
 # ---------------------------------------------------------------------------
@@ -82,7 +81,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "go": ["type_declaration"],
     "rust": ["struct_item", "enum_item", "impl_item"],
     "java": ["class_declaration", "interface_declaration", "enum_declaration"],
-    "c_sharp": ["class_declaration", "interface_declaration", "enum_declaration", "struct_declaration"],
+    "c_sharp": [
+        "class_declaration", "interface_declaration",
+        "enum_declaration", "struct_declaration",
+    ],
     "ruby": ["class", "module"],
     "kotlin": ["class_declaration", "object_declaration"],
     "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
@@ -474,11 +476,13 @@ class CodeParser:
                         if spec.type == "import_spec":
                             for s in spec.children:
                                 if s.type == "interpreted_string_literal":
-                                    imports.append(s.text.decode("utf-8", errors="replace").strip('"'))
+                                    val = s.text.decode("utf-8", errors="replace")
+                                    imports.append(val.strip('"'))
                 elif child.type == "import_spec":
                     for s in child.children:
                         if s.type == "interpreted_string_literal":
-                            imports.append(s.text.decode("utf-8", errors="replace").strip('"'))
+                            val = s.text.decode("utf-8", errors="replace")
+                            imports.append(val.strip('"'))
         elif language == "rust":
             # use crate::module::item
             imports.append(text.replace("use ", "").rstrip(";").strip())
@@ -511,7 +515,11 @@ class CodeParser:
             return first.text.decode("utf-8", errors="replace")
 
         # Method call: obj.method(args)
-        if first.type in ("attribute", "member_expression", "field_expression", "selector_expression"):
+        member_types = (
+            "attribute", "member_expression",
+            "field_expression", "selector_expression",
+        )
+        if first.type in member_types:
             # Get the rightmost identifier (the method name)
             for child in reversed(first.children):
                 if child.type in (

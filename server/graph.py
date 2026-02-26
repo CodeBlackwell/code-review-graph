@@ -10,15 +10,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import networkx as nx
 
 from .parser import EdgeInfo, NodeInfo
-
 
 # ---------------------------------------------------------------------------
 # Schema
