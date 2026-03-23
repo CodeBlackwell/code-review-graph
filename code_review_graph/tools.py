@@ -251,6 +251,11 @@ _QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "overrides_of": "Find all CSS selectors that a given selector overrides",
+    "overridden_by": "Find all CSS selectors that override a given selector",
+    "styles_of": "Find CSS selectors that style a component or function",
+    "styled_by": "Find components/functions that use a given CSS selector",
+    "conflicts_of": "Find potential cross-file CSS conflicts for a selector",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -264,7 +269,9 @@ def query_graph(
 
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
-                 importers_of, children_of, tests_for, inheritors_of, file_summary.
+                 importers_of, children_of, tests_for, inheritors_of,
+                 overrides_of, overridden_by, styles_of, styled_by,
+                 conflicts_of, file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
 
@@ -386,6 +393,52 @@ def query_graph(
                     child = store.get_node(e.source_qualified)
                     if child:
                         results.append(node_to_dict(child))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overrides_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "OVERRIDES":
+                    overridden = store.get_node(e.target_qualified)
+                    if overridden:
+                        results.append(node_to_dict(overridden))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overridden_by":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "OVERRIDES":
+                    overrider = store.get_node(e.source_qualified)
+                    if overrider:
+                        results.append(node_to_dict(overrider))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "styles_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "STYLES":
+                    styled = store.get_node(e.target_qualified)
+                    if styled:
+                        results.append(node_to_dict(styled))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "styled_by":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "STYLES":
+                    styler = store.get_node(e.source_qualified)
+                    if styler:
+                        results.append(node_to_dict(styler))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "conflicts_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "POTENTIAL_CONFLICT":
+                    conflict = store.get_node(e.target_qualified)
+                    if conflict:
+                        results.append(node_to_dict(conflict))
+                    edges_out.append(edge_to_dict(e))
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "POTENTIAL_CONFLICT":
+                    conflict = store.get_node(e.source_qualified)
+                    if conflict:
+                        results.append(node_to_dict(conflict))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
@@ -577,6 +630,14 @@ def _generate_review_guidance(impact: dict, changed_files: list[str]) -> str:
         guidance_parts.append(
             f"- {len(inheritance_edges)} inheritance/implementation relationship(s) affected. "
             "Check for Liskov substitution violations."
+        )
+
+    # Check for CSS override changes
+    override_edges = [e for e in impact["edges"] if e.kind == "OVERRIDES"]
+    if override_edges:
+        guidance_parts.append(
+            f"- {len(override_edges)} CSS override relationship(s) affected. "
+            "Check for specificity conflicts and unintended style changes."
         )
 
     # Check for cross-file impact
