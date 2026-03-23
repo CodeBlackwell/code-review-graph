@@ -1,7 +1,8 @@
 """SQLite-backed knowledge graph storage and query engine.
 
 Stores code structure as nodes (File, Class, Function, Type, Test) and
-edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, OVERRIDES).
+edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON,
+OVERRIDES, STYLES, POTENTIAL_CONFLICT).
 Supports impact-radius queries and subgraph extraction.
 """
 
@@ -530,6 +531,32 @@ class GraphStore:
                 if edge.target_qualified in qualified_names:
                     results.append(edge)
         return results
+
+    def delete_edges_by_kind(self, kind: str) -> int:
+        """Delete all edges of the given kind. Returns count of deleted rows."""
+        cur = self._conn.execute("DELETE FROM edges WHERE kind = ?", (kind,))
+        self._invalidate_cache()
+        return cur.rowcount
+
+    def get_nodes_by_extra_pattern(
+        self, pattern: str, kind: str | None = None,
+    ) -> list[GraphNode]:
+        """Find nodes where extra JSON matches a LIKE pattern.
+
+        Args:
+            pattern: SQL LIKE pattern, e.g. '%"css_kind":"selector"%'.
+            kind: Optional node kind filter (Class, Function, etc.).
+        """
+        if kind:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE extra LIKE ? AND kind = ?",
+                (pattern, kind),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE extra LIKE ?", (pattern,),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
 
     # --- Internal helpers ---
 

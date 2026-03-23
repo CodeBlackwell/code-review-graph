@@ -76,6 +76,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".vue": "vue",
     ".css": "css",
     ".scss": "scss",
+    ".less": "less",
 }
 
 # Tree-sitter node type mappings per language
@@ -261,6 +262,10 @@ class CodeParser:
         if language in ("css", "scss"):
             return self._parse_css(path, source, language)
 
+        # LESS: regex-based fallback (no tree-sitter grammar available)
+        if language == "less":
+            return self._parse_less(path, source)
+
         parser = self._get_parser(language)
         if not parser:
             return [], []
@@ -287,11 +292,41 @@ class CodeParser:
             tree.root_node, language, source,
         )
 
-        # Walk the tree
+        # Walk the tree (with JSX class collection for JSX-capable languages)
+        jsx_class_collector: dict[str, dict] = {}
         self._extract_from_tree(
             tree.root_node, source, language, file_path_str, nodes, edges,
             import_map=import_map, defined_names=defined_names,
+            jsx_class_collector=jsx_class_collector,
         )
+
+        # Attach collected JSX class refs to their enclosing function nodes
+        if jsx_class_collector:
+            node_by_qn: dict[str, NodeInfo] = {}
+            for n in nodes:
+                qn = self._qualify(n.name, n.file_path, n.parent_name)
+                node_by_qn[qn] = n
+            for func_qn, refs in jsx_class_collector.items():
+                target_node = node_by_qn.get(func_qn)
+                if target_node:
+                    if refs.get("classes"):
+                        target_node.extra["css_classes"] = sorted(
+                            set(refs["classes"]),
+                        )
+                    if refs.get("module_refs"):
+                        target_node.extra["css_module_refs"] = [
+                            {"import": imp, "property": prop}
+                            for imp, prop in refs["module_refs"]
+                        ]
+
+        # Detect CSS Module imports and store on File node
+        if import_map:
+            css_mod_imports = {
+                name: mod for name, mod in import_map.items()
+                if ".module.css" in mod or ".module.scss" in mod
+            }
+            if css_mod_imports:
+                nodes[0].extra["css_module_imports"] = css_mod_imports
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -456,6 +491,16 @@ class CodeParser:
 
             all_nodes.extend(style_nodes)
             all_edges.extend(style_edges)
+
+        # Extract static class names from <template> elements
+        for child in tree.root_node.children:
+            if child.type == "template_element":
+                template_classes = self._extract_vue_template_classes(child)
+                if template_classes:
+                    all_nodes[0].extra["vue_template_classes"] = sorted(
+                        set(template_classes),
+                    )
+                break  # Only one <template> per SFC
 
         # Generate TESTED_BY edges
         if test_file:
@@ -1121,6 +1166,310 @@ class CodeParser:
                 stack.append(child)
         return False
 
+    # --- LESS regex-based parser (v2) ---
+
+    # Regex patterns for LESS parsing (no tree-sitter grammar available)
+    _LESS_SELECTOR_RE = re.compile(
+        r"^([.#\w][\w\-\s>+~,.:[\]=*^$|\"'()]*?)\s*\{", re.MULTILINE,
+    )
+    _LESS_VARIABLE_RE = re.compile(r"^(@[\w-]+)\s*:\s*(.+?);", re.MULTILINE)
+    _LESS_IMPORT_RE = re.compile(
+        r'@import\s+(?:\([^)]+\)\s+)?["\']([^"\']+)["\']', re.MULTILINE,
+    )
+    _LESS_MIXIN_DEF_RE = re.compile(
+        r"^([.#][\w-]+)\s*\(([^)]*)\)\s*\{", re.MULTILINE,
+    )
+    _LESS_MIXIN_CALL_RE = re.compile(
+        r"^\s*([.#][\w-]+)\s*\(([^)]*)\)\s*;", re.MULTILINE,
+    )
+
+    @staticmethod
+    def _less_specificity(selector_text: str) -> tuple[int, int, int]:
+        """Compute CSS specificity from selector text using regex.
+
+        Returns (a, b, c) where a=IDs, b=classes/attrs/pseudo-classes,
+        c=type selectors/pseudo-elements.
+        """
+        # Strip pseudo-elements first (::before, ::after, etc.)
+        stripped = re.sub(r"::[a-zA-Z-]+", "", selector_text)
+        a = len(re.findall(r"#[\w-]+", stripped))
+        b = len(re.findall(r"\.[\w-]+", stripped))
+        b += len(re.findall(r"\[[\w-]+", stripped))
+        b += len(re.findall(r":[\w-]+", stripped))
+        # Type selectors: standalone word not preceded by . # : [
+        c = len(re.findall(r"(?<![.#:\[])(?:^|[\s>+~])([a-zA-Z][\w]*)", stripped))
+        return (a, b, c)
+
+    def _parse_less(
+        self, path: Path, source: bytes, line_offset: int = 0,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a LESS file using regex-based extraction.
+
+        Creates same NodeInfo/EdgeInfo structures as _parse_css().
+        Supports selectors, @variables, @import, mixins, and mixin calls.
+        Note: nesting is not fully resolved (top-level selectors only).
+        """
+        file_path_str = str(path)
+        text = source.decode("utf-8", errors="replace")
+        nodes: list[NodeInfo] = []
+        edges: list[EdgeInfo] = []
+        selector_records: list[CodeParser._SelectorRecord] = []
+
+        # File node
+        nodes.append(NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1 + line_offset,
+            line_end=text.count("\n") + 1 + line_offset,
+            language="less",
+        ))
+
+        source_order = 0
+
+        # Extract @import statements
+        for m in self._LESS_IMPORT_RE.finditer(text):
+            target = m.group(1)
+            line = text[:m.start()].count("\n") + 1 + line_offset
+            edges.append(EdgeInfo(
+                kind="IMPORTS_FROM",
+                source=file_path_str,
+                target=target,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # Extract @variable declarations
+        for m in self._LESS_VARIABLE_RE.finditer(text):
+            var_name = m.group(1)
+            line = text[:m.start()].count("\n") + 1 + line_offset
+            qualified = self._qualify(var_name, file_path_str, None)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=var_name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=line,
+                language="less",
+                extra={"css_kind": "less_variable"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # Extract mixin definitions (before selectors to avoid double-matching)
+        mixin_names: set[str] = set()
+        for m in self._LESS_MIXIN_DEF_RE.finditer(text):
+            mixin_name = m.group(1)
+            params = m.group(2).strip()
+            line = text[:m.start()].count("\n") + 1 + line_offset
+            mixin_names.add(mixin_name)
+            qualified = self._qualify(mixin_name, file_path_str, None)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=mixin_name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=line,
+                language="less",
+                params=params if params else None,
+                extra={"css_kind": "mixin"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # Extract selectors (skip lines that are mixin definitions)
+        for m in self._LESS_SELECTOR_RE.finditer(text):
+            sel_text = m.group(1).strip()
+            if not sel_text:
+                continue
+            # Skip if this is a mixin definition (has parens)
+            full_line = text[m.start():m.end()]
+            if re.search(r"\(", full_line.split("{")[0]):
+                continue
+            # Skip @-rules
+            if sel_text.startswith("@"):
+                continue
+
+            line_start = text[:m.start()].count("\n") + 1 + line_offset
+            # Split comma-separated selectors
+            for individual in sel_text.split(","):
+                individual = individual.strip()
+                if not individual:
+                    continue
+                specificity = self._less_specificity(individual)
+                qualified = self._qualify(individual, file_path_str, None)
+                nodes.append(NodeInfo(
+                    kind="Class",
+                    name=individual,
+                    file_path=file_path_str,
+                    line_start=line_start,
+                    line_end=line_start,
+                    language="less",
+                    extra={
+                        "css_kind": "selector",
+                        "specificity": list(specificity),
+                    },
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=file_path_str,
+                    target=qualified,
+                    file_path=file_path_str,
+                    line=line_start,
+                ))
+                # Collect for override detection
+                selector_records.append(self._SelectorRecord(
+                    selector_text=individual,
+                    qualified_name=qualified,
+                    specificity=specificity,
+                    properties={},
+                    has_important={},
+                    line_start=line_start,
+                    line_end=line_start,
+                    source_order=source_order,
+                ))
+                source_order += 1
+
+        # Extract mixin calls
+        for m in self._LESS_MIXIN_CALL_RE.finditer(text):
+            call_name = m.group(1)
+            line = text[:m.start()].count("\n") + 1 + line_offset
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=file_path_str,
+                target=self._qualify(call_name, file_path_str, None),
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # Detect overrides among selectors
+        override_edges = self._detect_css_overrides(
+            selector_records, file_path_str,
+        )
+        edges.extend(override_edges)
+
+        return nodes, edges
+
+    # --- JSX / Vue template class extraction (v2) ---
+
+    @staticmethod
+    def _camel_to_kebab(name: str) -> str:
+        """Convert camelCase to kebab-case for CSS Modules resolution.
+
+        Examples: btnPrimary → btn-primary, navItem → nav-item
+        """
+        return re.sub(r"(?<=[a-z0-9])([A-Z])", r"-\1", name).lower()
+
+    def _extract_jsx_class_refs(
+        self, attr_node, source: bytes,
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """Extract class names from a jsx_attribute node.
+
+        Returns (static_classes, module_refs) where module_refs are
+        (import_name, property_name) tuples for CSS Modules.
+        """
+        static_classes: list[str] = []
+        module_refs: list[tuple[str, str]] = []
+
+        # Check this is a className or class attribute
+        attr_name = None
+        value_node = None
+        for child in attr_node.children:
+            if child.type == "property_identifier":
+                attr_name = child.text.decode("utf-8", errors="replace")
+            elif child.type == "string":
+                value_node = child
+            elif child.type == "jsx_expression":
+                value_node = child
+
+        if attr_name not in ("className", "class"):
+            return static_classes, module_refs
+
+        if value_node is None:
+            return static_classes, module_refs
+
+        if value_node.type == "string":
+            # className="btn btn-primary"
+            text = value_node.text.decode("utf-8", errors="replace")
+            text = text.strip("'\"")
+            static_classes.extend(text.split())
+        elif value_node.type == "jsx_expression":
+            # Look inside the expression
+            for expr_child in value_node.children:
+                if expr_child.type == "string":
+                    # className={"btn btn-primary"}
+                    text = expr_child.text.decode("utf-8", errors="replace")
+                    text = text.strip("'\"")
+                    static_classes.extend(text.split())
+                elif expr_child.type == "template_string":
+                    # className={`btn ${...}`} — extract literal parts
+                    for frag in expr_child.children:
+                        if frag.type == "string_fragment":
+                            for part in frag.text.decode(
+                                "utf-8", errors="replace",
+                            ).split():
+                                if part and not part.startswith("$"):
+                                    static_classes.append(part)
+                elif expr_child.type == "member_expression":
+                    # className={styles.btnPrimary}
+                    obj_name = None
+                    prop_name = None
+                    for me_child in expr_child.children:
+                        if me_child.type == "identifier":
+                            obj_name = me_child.text.decode(
+                                "utf-8", errors="replace",
+                            )
+                        elif me_child.type == "property_identifier":
+                            prop_name = me_child.text.decode(
+                                "utf-8", errors="replace",
+                            )
+                    if obj_name and prop_name:
+                        module_refs.append((obj_name, prop_name))
+
+        return static_classes, module_refs
+
+    def _extract_vue_template_classes(self, node) -> list[str]:
+        """Recursively walk Vue template AST, extract class='...' values.
+
+        Only extracts static class attributes, skips :class dynamic bindings.
+        """
+        classes: list[str] = []
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if n.type == "attribute":
+                attr_name = None
+                attr_value = None
+                for child in n.children:
+                    if child.type == "attribute_name":
+                        attr_name = child.text.decode(
+                            "utf-8", errors="replace",
+                        )
+                    elif child.type == "quoted_attribute_value":
+                        for v in child.children:
+                            if v.type == "attribute_value":
+                                attr_value = v.text.decode(
+                                    "utf-8", errors="replace",
+                                )
+                if attr_name == "class" and attr_value:
+                    classes.extend(attr_value.split())
+            # Skip directive_attribute (:class bindings)
+            elif n.type == "directive_attribute":
+                continue
+            for child in n.children:
+                stack.append(child)
+        return classes
+
     def _resolve_call_targets(
         self,
         nodes: list[NodeInfo],
@@ -1175,6 +1524,7 @@ class CodeParser:
         import_map: Optional[dict[str, str]] = None,
         defined_names: Optional[set[str]] = None,
         _depth: int = 0,
+        jsx_class_collector: Optional[dict[str, dict]] = None,
     ) -> None:
         """Recursively walk the AST and extract nodes/edges."""
         if _depth > self._MAX_AST_DEPTH:
@@ -1228,6 +1578,7 @@ class CodeParser:
                         enclosing_class=name, enclosing_func=None,
                         import_map=import_map, defined_names=defined_names,
                         _depth=_depth + 1,
+                        jsx_class_collector=jsx_class_collector,
                     )
                     continue
 
@@ -1292,6 +1643,7 @@ class CodeParser:
                         enclosing_class=enclosing_class, enclosing_func=name,
                         import_map=import_map, defined_names=defined_names,
                         _depth=_depth + 1,
+                        jsx_class_collector=jsx_class_collector,
                     )
                     continue
 
@@ -1324,6 +1676,27 @@ class CodeParser:
                         file_path=file_path,
                         line=child.start_point[0] + 1,
                     ))
+
+            # --- JSX className extraction ---
+            if (
+                node_type == "jsx_attribute"
+                and language in ("javascript", "typescript", "tsx")
+                and jsx_class_collector is not None
+            ):
+                static_cls, mod_refs = self._extract_jsx_class_refs(
+                    child, source,
+                )
+                func_key = self._qualify(
+                    enclosing_func or "<module>", file_path, enclosing_class,
+                )
+                if static_cls or mod_refs:
+                    if func_key not in jsx_class_collector:
+                        jsx_class_collector[func_key] = {
+                            "classes": [], "module_refs": [],
+                        }
+                    entry = jsx_class_collector[func_key]
+                    entry["classes"].extend(static_cls)
+                    entry["module_refs"].extend(mod_refs)
 
             # --- Solidity-specific constructs ---
             if language == "solidity":
@@ -1457,6 +1830,7 @@ class CodeParser:
                 enclosing_class=enclosing_class, enclosing_func=enclosing_func,
                 import_map=import_map, defined_names=defined_names,
                 _depth=_depth + 1,
+                jsx_class_collector=jsx_class_collector,
             )
 
     def _collect_file_scope(

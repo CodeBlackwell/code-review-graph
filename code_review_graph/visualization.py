@@ -269,6 +269,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="legend-item" data-edge-kind="INHERITS"><span class="legend-line l-inherits"></span> Inherits</div>
     <div class="legend-item" data-edge-kind="CONTAINS"><span class="legend-line l-contains"></span> Contains</div>
     <div class="legend-item" data-edge-kind="OVERRIDES"><span class="legend-line l-overrides"></span> Overrides</div>
+    <div class="legend-item" data-edge-kind="STYLES"><span class="legend-line l-styles"></span> Styles</div>
+    <div class="legend-item" data-edge-kind="POTENTIAL_CONFLICT"><span class="legend-line l-conflict"></span> Conflict</div>
   </div>
 </div>
 
@@ -288,7 +290,7 @@ const graphData = __GRAPH_DATA__;
 // -- Config --
 const KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
 const KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-const EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", OVERRIDES:"#f778ba" };
+const EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", OVERRIDES:"#f778ba", STYLES:"#79c0ff", POTENTIAL_CONFLICT:"#f85149" };
 
 // -- Display name: short, clean labels --
 function displayName(d) {
@@ -393,7 +395,7 @@ const glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
 
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-overrides",color:"#f778ba"}].forEach(mk => {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-overrides",color:"#f778ba"},{id:"arrow-styles",color:"#79c0ff"},{id:"arrow-conflict",color:"#f85149"}].forEach(mk => {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -427,6 +429,8 @@ const EDGE_CFG = {
   IMPORTS_FROM: { dash:"6,3",  width:1.5, opacity:0.65, marker:"url(#arrow-imports)" },
   INHERITS:     { dash:"3,4",  width:2,   opacity:0.7,  marker:"url(#arrow-inherits)" },
   OVERRIDES:    { dash:"2,4",  width:1.5, opacity:0.65, marker:"url(#arrow-overrides)" },
+  STYLES:       { dash:"4,4", width:1.5, opacity:0.6,  marker:"url(#arrow-styles)" },
+  POTENTIAL_CONFLICT: { dash:"2,2", width:2, opacity:0.8, marker:"url(#arrow-conflict)" },
 };
 
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
