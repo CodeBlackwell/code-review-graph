@@ -251,6 +251,8 @@ _QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "overrides_of": "Find all CSS selectors that a given selector overrides",
+    "overridden_by": "Find all CSS selectors that override a given selector",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -386,6 +388,22 @@ def query_graph(
                     child = store.get_node(e.source_qualified)
                     if child:
                         results.append(node_to_dict(child))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overrides_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "OVERRIDES":
+                    overridden = store.get_node(e.target_qualified)
+                    if overridden:
+                        results.append(node_to_dict(overridden))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overridden_by":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "OVERRIDES":
+                    overrider = store.get_node(e.source_qualified)
+                    if overrider:
+                        results.append(node_to_dict(overrider))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
@@ -577,6 +595,14 @@ def _generate_review_guidance(impact: dict, changed_files: list[str]) -> str:
         guidance_parts.append(
             f"- {len(inheritance_edges)} inheritance/implementation relationship(s) affected. "
             "Check for Liskov substitution violations."
+        )
+
+    # Check for CSS override changes
+    override_edges = [e for e in impact["edges"] if e.kind == "OVERRIDES"]
+    if override_edges:
+        guidance_parts.append(
+            f"- {len(override_edges)} CSS override relationship(s) affected. "
+            "Check for specificity conflicts and unintended style changes."
         )
 
     # Check for cross-file impact

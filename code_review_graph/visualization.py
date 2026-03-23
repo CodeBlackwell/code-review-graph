@@ -195,6 +195,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .l-imports  { border-top: 2px dashed #f0883e; }
   .l-inherits { border-top: 2.5px dotted #d2a8ff; }
   .l-contains { border-top: 1.5px solid rgba(139,148,158,0.3); }
+  .l-overrides { border-top: 2px dotted #f778ba; }
 
   #stats-bar {
     position: absolute; bottom: 0; left: 0; right: 0;
@@ -267,6 +268,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="legend-item" data-edge-kind="IMPORTS_FROM"><span class="legend-line l-imports"></span> Imports</div>
     <div class="legend-item" data-edge-kind="INHERITS"><span class="legend-line l-inherits"></span> Inherits</div>
     <div class="legend-item" data-edge-kind="CONTAINS"><span class="legend-line l-contains"></span> Contains</div>
+    <div class="legend-item" data-edge-kind="OVERRIDES"><span class="legend-line l-overrides"></span> Overrides</div>
   </div>
 </div>
 
@@ -286,7 +288,7 @@ const graphData = __GRAPH_DATA__;
 // -- Config --
 const KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
 const KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-const EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)" };
+const EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", OVERRIDES:"#f778ba" };
 
 // -- Display name: short, clean labels --
 function displayName(d) {
@@ -350,11 +352,14 @@ function showTooltip(ev, d) {
   const bg = KIND_COLOR[d.kind] || "#555";
   const relFile = d.file_path ? d.file_path.split("/").slice(-3).join("/") : "";
   let h = `<span class="tt-name">${escH(d.label)}</span>`;
-  h += `<span class="tt-kind" style="background:${bg};color:#0d1117">${d.kind}</span>`;
+  const ex = d.extra || {};
+  const kindLabel = ex.css_kind ? ("CSS " + escH(ex.css_kind)) : (ex.solidity_kind ? ("Solidity " + escH(ex.solidity_kind)) : escH(d.kind));
+  h += `<span class="tt-kind" style="background:${bg};color:#0d1117">${kindLabel}</span>`;
   if (relFile) h += `<div class="tt-row tt-file">${escH(relFile)}</div>`;
   if (d.line_start != null) h += `<div class="tt-row"><span class="tt-label">Lines: </span>${d.line_start} \u2013 ${d.line_end || d.line_start}</div>`;
   if (d.params) h += `<div class="tt-row"><span class="tt-label">Params: </span>${escH(d.params)}</div>`;
   if (d.return_type) h += `<div class="tt-row"><span class="tt-label">Returns: </span>${escH(d.return_type)}</div>`;
+  if (ex.specificity) { const sp = ex.specificity; h += `<div class="tt-row"><span class="tt-label">Specificity: </span>(${Array.isArray(sp)?sp.join(","):sp})</div>`; }
   tooltip.innerHTML = h;
   tooltip.classList.add("visible");
   moveTooltip(ev);
@@ -388,7 +393,7 @@ const glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
 
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"}].forEach(mk => {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-overrides",color:"#f778ba"}].forEach(mk => {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -421,6 +426,7 @@ const EDGE_CFG = {
   CALLS:        { dash:null,   width:1.5, opacity:0.7,  marker:"url(#arrow-calls)" },
   IMPORTS_FROM: { dash:"6,3",  width:1.5, opacity:0.65, marker:"url(#arrow-imports)" },
   INHERITS:     { dash:"3,4",  width:2,   opacity:0.7,  marker:"url(#arrow-inherits)" },
+  OVERRIDES:    { dash:"2,4",  width:1.5, opacity:0.65, marker:"url(#arrow-overrides)" },
 };
 
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
@@ -479,8 +485,9 @@ function updateNodes() {
   enter.append("circle").attr("class","node-circle")
     .attr("r", d => KIND_RADIUS[d.kind] || 6)
     .attr("fill", d => KIND_COLOR[d.kind] || "#8b949e")
-    .attr("stroke", d => d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)")
-    .attr("stroke-width", d => d.kind === "File" ? 2 : 1)
+    .attr("stroke", d => { if ((d.extra||{}).css_kind) return "#f778ba"; return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
+    .attr("stroke-width", d => { if ((d.extra||{}).css_kind) return 2; return d.kind === "File" ? 2 : 1; })
+    .attr("stroke-dasharray", d => (d.extra||{}).css_kind ? "3,2" : null)
     .attr("cursor", d => d.kind === "File" ? "pointer" : "grab");
 
   enter
