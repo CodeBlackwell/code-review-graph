@@ -40,7 +40,7 @@ class NodeInfo:
 
 @dataclass
 class EdgeInfo:
-    kind: str  # CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON
+    kind: str  # CALLS, IMPORTS_FROM, INHERITS, ..., DEPENDS_ON, OVERRIDES
     source: str  # qualified name or path
     target: str  # qualified name or path
     file_path: str
@@ -74,6 +74,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".php": "php",
     ".sol": "solidity",
     ".vue": "vue",
+    ".css": "css",
+    ".scss": "scss",
 }
 
 # Tree-sitter node type mappings per language
@@ -255,6 +257,10 @@ class CodeParser:
         if language == "vue":
             return self._parse_vue(path, source)
 
+        # CSS/SCSS: dedicated parser for stylesheet languages
+        if language in ("css", "scss"):
+            return self._parse_css(path, source, language)
+
         parser = self._get_parser(language)
         if not parser:
             return [], []
@@ -402,6 +408,55 @@ class CodeParser:
             all_nodes.extend(nodes)
             all_edges.extend(edges)
 
+        # Extract <style> blocks and delegate to CSS/SCSS parser
+        for child in tree.root_node.children:
+            if child.type != "style_element":
+                continue
+
+            style_lang = "css"
+            raw_text_node = None
+            start_tag = None
+            for sub in child.children:
+                if sub.type == "start_tag":
+                    start_tag = sub
+                elif sub.type == "raw_text":
+                    raw_text_node = sub
+
+            if start_tag:
+                for attr in start_tag.children:
+                    if attr.type == "attribute":
+                        attr_name = None
+                        attr_value = None
+                        for a in attr.children:
+                            if a.type == "attribute_name":
+                                attr_name = a.text.decode("utf-8", errors="replace")
+                            elif a.type == "quoted_attribute_value":
+                                for v in a.children:
+                                    if v.type == "attribute_value":
+                                        attr_value = v.text.decode(
+                                            "utf-8", errors="replace",
+                                        )
+                        if attr_name == "lang" and attr_value in ("scss", "sass"):
+                            style_lang = "scss"
+
+            if not raw_text_node:
+                continue
+
+            style_source = raw_text_node.text
+            style_line_offset = raw_text_node.start_point[0]
+
+            style_nodes, style_edges = self._parse_css(
+                path, style_source, style_lang, line_offset=style_line_offset,
+            )
+
+            # Remove the File node that _parse_css creates (we already have one)
+            style_nodes = [n for n in style_nodes if n.kind != "File"]
+            for sn in style_nodes:
+                sn.language = "vue"
+
+            all_nodes.extend(style_nodes)
+            all_edges.extend(style_edges)
+
         # Generate TESTED_BY edges
         if test_file:
             test_qnames = set()
@@ -420,6 +475,651 @@ class CodeParser:
                     ))
 
         return all_nodes, all_edges
+
+    # -------------------------------------------------------------------
+    # CSS / SCSS parsing
+    # -------------------------------------------------------------------
+
+    @dataclass
+    class _SelectorRecord:
+        """Ephemeral record for CSS override detection within a single file."""
+
+        selector_text: str
+        qualified_name: str
+        specificity: tuple[int, int, int]
+        properties: dict[str, int]          # property_name -> line
+        has_important: dict[str, bool]      # property_name -> has !important
+        line_start: int
+        line_end: int
+        source_order: int
+
+    def _parse_css(
+        self,
+        path: Path,
+        source: bytes,
+        language: str = "css",
+        line_offset: int = 0,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a CSS/SCSS file and extract selectors, custom properties,
+        mixins, variables, @import, var() usage, and override relationships."""
+        css_parser = self._get_parser(language)
+        if not css_parser:
+            return [], []
+
+        tree = css_parser.parse(source)
+        file_path_str = str(path)
+
+        nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1 + line_offset,
+            line_end=source.count(b"\n") + 1 + line_offset,
+            language=language,
+        )]
+        edges: list[EdgeInfo] = []
+        selector_records: list[CodeParser._SelectorRecord] = []
+
+        self._walk_css(
+            tree.root_node, source, language, file_path_str,
+            nodes, edges, selector_records,
+            enclosing_context=None, line_offset=line_offset,
+        )
+
+        # Override detection (post-processing after all selectors collected)
+        override_edges = self._detect_css_overrides(selector_records, file_path_str)
+        edges.extend(override_edges)
+
+        return nodes, edges
+
+    def _walk_css(
+        self,
+        node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        selector_records: list[_SelectorRecord],
+        enclosing_context: Optional[str] = None,
+        line_offset: int = 0,
+        _depth: int = 0,
+    ) -> None:
+        """Recursively walk CSS/SCSS AST extracting nodes and edges."""
+        if _depth > self._MAX_AST_DEPTH:
+            return
+
+        for child in node.children:
+            node_type = child.type
+
+            # --- @import / @use ---
+            if node_type in ("import_statement", "use_statement"):
+                target = self._extract_css_import(child)
+                if target:
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=target,
+                        file_path=file_path,
+                        line=child.start_point[0] + 1 + line_offset,
+                    ))
+                continue
+
+            # --- rule_set (selector + block) ---
+            if node_type == "rule_set":
+                self._handle_css_ruleset(
+                    child, source, language, file_path,
+                    nodes, edges, selector_records,
+                    enclosing_context, line_offset, _depth,
+                )
+                continue
+
+            # --- @media ---
+            if node_type == "media_statement":
+                media_text = self._get_css_media_text(child)
+                media_name = f"@media({media_text})"
+                qualified = self._qualify(media_name, file_path, None)
+
+                nodes.append(NodeInfo(
+                    kind="Class",
+                    name=media_name,
+                    file_path=file_path,
+                    line_start=child.start_point[0] + 1 + line_offset,
+                    line_end=child.end_point[0] + 1 + line_offset,
+                    language=language,
+                    extra={"css_kind": "media_query"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=file_path,
+                    target=qualified,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1 + line_offset,
+                ))
+
+                for sub in child.children:
+                    if sub.type == "block":
+                        self._walk_css(
+                            sub, source, language, file_path,
+                            nodes, edges, selector_records,
+                            enclosing_context=media_name,
+                            line_offset=line_offset,
+                            _depth=_depth + 1,
+                        )
+                continue
+
+            # --- @keyframes ---
+            if node_type == "keyframes_statement":
+                kf_name = None
+                for sub in child.children:
+                    if sub.type == "keyframes_name":
+                        kf_name = sub.text.decode("utf-8", errors="replace")
+                if kf_name:
+                    name = f"@keyframes({kf_name})"
+                    nodes.append(NodeInfo(
+                        kind="Class",
+                        name=name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1 + line_offset,
+                        line_end=child.end_point[0] + 1 + line_offset,
+                        language=language,
+                        extra={"css_kind": "keyframes"},
+                    ))
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=file_path,
+                        target=self._qualify(name, file_path, None),
+                        file_path=file_path,
+                        line=child.start_point[0] + 1 + line_offset,
+                    ))
+                continue
+
+            # --- SCSS: top-level $variable declarations ---
+            if language == "scss" and node_type == "declaration":
+                prop_name = self._get_css_property_name(child)
+                if prop_name and prop_name.startswith("$"):
+                    nodes.append(NodeInfo(
+                        kind="Function",
+                        name=prop_name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1 + line_offset,
+                        line_end=child.end_point[0] + 1 + line_offset,
+                        language=language,
+                        extra={"css_kind": "scss_variable"},
+                    ))
+                    container = (
+                        self._qualify(enclosing_context, file_path, None)
+                        if enclosing_context
+                        else file_path
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=self._qualify(prop_name, file_path, None),
+                        file_path=file_path,
+                        line=child.start_point[0] + 1 + line_offset,
+                    ))
+                continue
+
+            # --- SCSS: @mixin ---
+            if language == "scss" and node_type == "mixin_statement":
+                mixin_name = None
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        mixin_name = sub.text.decode("utf-8", errors="replace")
+                        break
+                if mixin_name:
+                    nodes.append(NodeInfo(
+                        kind="Function",
+                        name=mixin_name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1 + line_offset,
+                        line_end=child.end_point[0] + 1 + line_offset,
+                        language=language,
+                        extra={"css_kind": "mixin"},
+                    ))
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=file_path,
+                        target=self._qualify(mixin_name, file_path, None),
+                        file_path=file_path,
+                        line=child.start_point[0] + 1 + line_offset,
+                    ))
+                continue
+
+            # --- Recurse into other nodes ---
+            self._walk_css(
+                child, source, language, file_path,
+                nodes, edges, selector_records,
+                enclosing_context=enclosing_context,
+                line_offset=line_offset,
+                _depth=_depth + 1,
+            )
+
+    def _handle_css_ruleset(
+        self,
+        node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        selector_records: list[_SelectorRecord],
+        enclosing_context: Optional[str],
+        line_offset: int,
+        _depth: int,
+    ) -> None:
+        """Process a CSS rule_set: extract selectors, properties, var() refs."""
+        selectors_node = None
+        block_node = None
+        for sub in node.children:
+            if sub.type == "selectors":
+                selectors_node = sub
+            elif sub.type == "block":
+                block_node = sub
+
+        if not selectors_node:
+            return
+
+        # Extract properties and var() refs from the block
+        properties: dict[str, int] = {}
+        has_important: dict[str, bool] = {}
+        var_refs: list[tuple[str, int]] = []   # (var_name, line)
+        include_refs: list[tuple[str, int]] = []  # (mixin_name, line)
+        custom_prop_defs: list[tuple[str, int, int]] = []  # (name, line_start, line_end)
+
+        if block_node:
+            for decl in block_node.children:
+                if decl.type == "declaration":
+                    prop = self._get_css_property_name(decl)
+                    if prop:
+                        line = decl.start_point[0] + 1 + line_offset
+                        if prop.startswith("--"):
+                            # Custom property definition
+                            custom_prop_defs.append((
+                                prop, line, decl.end_point[0] + 1 + line_offset,
+                            ))
+                        else:
+                            properties[prop] = line
+                            has_important[prop] = self._has_important(decl)
+                        # Check for var() references in value
+                        for var_name in self._find_var_refs(decl):
+                            var_refs.append((var_name, line))
+                elif decl.type == "include_statement" and language == "scss":
+                    # @include mixin_name
+                    for sub in decl.children:
+                        if sub.type == "identifier":
+                            include_refs.append((
+                                sub.text.decode("utf-8", errors="replace"),
+                                decl.start_point[0] + 1 + line_offset,
+                            ))
+                            break
+
+        # Split comma-separated selectors into individual nodes
+        individual_selectors = self._split_css_selectors(selectors_node)
+
+        # Create custom property nodes once (not per selector in comma groups)
+        seen_custom_props: set[str] = set()
+        first_qualified: Optional[str] = None
+
+        for sel_text, sel_node in individual_selectors:
+            # Resolve SCSS nesting selector (&)
+            if language == "scss" and enclosing_context and "&" in sel_text:
+                # For BEM: &-primary → .btn-primary (parent is .btn)
+                parent_sel = enclosing_context
+                if parent_sel.startswith("@"):
+                    parent_sel = ""  # Don't resolve & against @media
+                sel_text = sel_text.replace("&", parent_sel)
+
+            specificity = self._compute_specificity(sel_node)
+            qualified = self._qualify(sel_text, file_path, enclosing_context)
+            if first_qualified is None:
+                first_qualified = qualified
+
+            nodes.append(NodeInfo(
+                kind="Class",
+                name=sel_text,
+                file_path=file_path,
+                line_start=node.start_point[0] + 1 + line_offset,
+                line_end=node.end_point[0] + 1 + line_offset,
+                language=language,
+                parent_name=enclosing_context,
+                extra={"css_kind": "selector", "specificity": list(specificity)},
+            ))
+
+            # CONTAINS edge
+            container = (
+                self._qualify(enclosing_context, file_path, None)
+                if enclosing_context
+                else file_path
+            )
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=container,
+                target=qualified,
+                file_path=file_path,
+                line=node.start_point[0] + 1 + line_offset,
+            ))
+
+            # Custom property definitions — only create once, parent to first selector
+            for cp_name, cp_start, cp_end in custom_prop_defs:
+                if cp_name in seen_custom_props:
+                    continue
+                seen_custom_props.add(cp_name)
+                cp_qualified = self._qualify(cp_name, file_path, None)
+                nodes.append(NodeInfo(
+                    kind="Function",
+                    name=cp_name,
+                    file_path=file_path,
+                    line_start=cp_start,
+                    line_end=cp_end,
+                    language=language,
+                    parent_name=sel_text,
+                    extra={"css_kind": "custom_property"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=first_qualified,
+                    target=cp_qualified,
+                    file_path=file_path,
+                    line=cp_start,
+                ))
+
+            # var() references → CALLS edges
+            for var_name, var_line in var_refs:
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=qualified,
+                    target=var_name,
+                    file_path=file_path,
+                    line=var_line,
+                ))
+
+            # SCSS @include → CALLS edges
+            for mixin_name, inc_line in include_refs:
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=qualified,
+                    target=mixin_name,
+                    file_path=file_path,
+                    line=inc_line,
+                ))
+
+            # Record for override detection
+            selector_records.append(CodeParser._SelectorRecord(
+                selector_text=sel_text,
+                qualified_name=qualified,
+                specificity=specificity,
+                properties=dict(properties),
+                has_important=dict(has_important),
+                line_start=node.start_point[0] + 1 + line_offset,
+                line_end=node.end_point[0] + 1 + line_offset,
+                source_order=len(selector_records),
+            ))
+
+        # Recurse into nested rule_sets (SCSS nesting / CSS nesting)
+        if block_node:
+            for sub in block_node.children:
+                if sub.type == "rule_set":
+                    # Use the first selector as enclosing context for nesting
+                    ctx = individual_selectors[0][0] if individual_selectors else enclosing_context
+                    self._handle_css_ruleset(
+                        sub, source, language, file_path,
+                        nodes, edges, selector_records,
+                        enclosing_context=ctx,
+                        line_offset=line_offset,
+                        _depth=_depth + 1,
+                    )
+
+    def _compute_specificity(self, selector_node) -> tuple[int, int, int]:
+        """Compute CSS specificity (a, b, c) from a selector AST node.
+
+        a = ID selectors, b = class/pseudo-class/attribute, c = type/pseudo-element.
+        """
+        a = b = c = 0
+        stack = [selector_node]
+        while stack:
+            n = stack.pop()
+            t = n.type
+            if t == "id_selector":
+                a += 1
+            elif t in ("class_selector", "pseudo_class_selector", "attribute_selector"):
+                b += 1
+            elif t == "pseudo_element_selector":
+                c += 1
+            elif t == "tag_name":
+                # Don't count tag_name inside pseudo_element_selector (already counted)
+                if not (n.parent and n.parent.type == "pseudo_element_selector"):
+                    c += 1
+            for child in n.children:
+                stack.append(child)
+        return (a, b, c)
+
+    def _detect_css_overrides(
+        self,
+        records: list[_SelectorRecord],
+        file_path: str,
+    ) -> list[EdgeInfo]:
+        """Detect CSS override relationships between selectors in a file."""
+        if len(records) < 2:
+            return []
+
+        # Build property → record indices
+        prop_index: dict[str, list[int]] = {}
+        for i, rec in enumerate(records):
+            for prop in rec.properties:
+                prop_index.setdefault(prop, []).append(i)
+
+        seen_pairs: set[tuple[str, str, str]] = set()
+        raw_edges: list[EdgeInfo] = []
+
+        max_override_candidates = 50  # Cap pairwise comparisons per property
+
+        for prop, rec_indices in prop_index.items():
+            if len(rec_indices) < 2:
+                continue
+            # Cap to avoid O(n²) blow-up on large files with common properties
+            candidates = rec_indices[:max_override_candidates]
+            for i in range(len(candidates)):
+                for j in range(i + 1, len(candidates)):
+                    ri = records[rec_indices[i]]
+                    rj = records[rec_indices[j]]
+                    result = self._check_override(ri, rj, prop)
+                    if result is None:
+                        continue
+                    winner, loser, mechanism = result
+                    pair_key = (winner.qualified_name, loser.qualified_name, prop)
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+                    raw_edges.append(EdgeInfo(
+                        kind="OVERRIDES",
+                        source=winner.qualified_name,
+                        target=loser.qualified_name,
+                        file_path=file_path,
+                        line=winner.line_start,
+                        extra={
+                            "properties": [prop],
+                            "source_specificity": list(winner.specificity),
+                            "target_specificity": list(loser.specificity),
+                            "mechanism": mechanism,
+                        },
+                    ))
+
+        # Consolidate: merge edges between same (source, target) pair
+        consolidated: dict[tuple[str, str], EdgeInfo] = {}
+        for edge in raw_edges:
+            key = (edge.source, edge.target)
+            if key in consolidated:
+                consolidated[key].extra["properties"].extend(edge.extra["properties"])
+            else:
+                consolidated[key] = edge
+
+        return list(consolidated.values())
+
+    def _check_override(
+        self,
+        a: _SelectorRecord,
+        b: _SelectorRecord,
+        prop: str,
+    ) -> Optional[tuple[_SelectorRecord, _SelectorRecord, str]]:
+        """Check if two selectors override each other for a property.
+
+        Returns (winner, loser, mechanism) or None.
+        """
+        a_imp = a.has_important.get(prop, False)
+        b_imp = b.has_important.get(prop, False)
+        if a_imp and not b_imp:
+            return (a, b, "important")
+        if b_imp and not a_imp:
+            return (b, a, "important")
+
+        # BEM refinement
+        if self._is_bem_refinement(a.selector_text, b.selector_text):
+            return (a, b, "bem_refinement")
+        if self._is_bem_refinement(b.selector_text, a.selector_text):
+            return (b, a, "bem_refinement")
+
+        # Same selector, source order
+        if a.selector_text == b.selector_text:
+            if a.source_order > b.source_order:
+                return (a, b, "source_order")
+            return (b, a, "source_order")
+
+        # Key selector match with different specificity
+        key_a = self._extract_key_selector(a.selector_text)
+        key_b = self._extract_key_selector(b.selector_text)
+        if key_a and key_b and key_a == key_b:
+            if a.specificity > b.specificity:
+                return (a, b, "specificity")
+            elif b.specificity > a.specificity:
+                return (b, a, "specificity")
+
+        return None
+
+    @staticmethod
+    def _is_bem_refinement(candidate: str, base: str) -> bool:
+        """Check if candidate is a BEM refinement of base.
+
+        Only applies to simple class selectors (e.g. .btn → .btn-primary).
+        """
+        candidate = candidate.strip()
+        base = base.strip()
+        if not base or not candidate or len(candidate) <= len(base):
+            return False
+        # Only match simple class selectors (no spaces, combinators, etc.)
+        if " " in base or ">" in base or "+" in base or "~" in base:
+            return False
+        if candidate.startswith(base):
+            next_char = candidate[len(base)]
+            return next_char in ("-", "_", ".")
+        return False
+
+    @staticmethod
+    def _extract_key_selector(selector_text: str) -> Optional[str]:
+        """Extract the rightmost simple selector (key selector)."""
+        parts = re.split(r"\s*[>+~]\s*|\s+", selector_text.strip())
+        return parts[-1] if parts else None
+
+    def _split_css_selectors(
+        self, selectors_node,
+    ) -> list[tuple[str, object]]:
+        """Split comma-separated selectors into (text, AST node) tuples."""
+        result: list[tuple[str, object]] = []
+        current_parts: list = []
+        for child in selectors_node.children:
+            if child.type == ",":
+                if current_parts:
+                    sel_text = self._normalize_selector_text(current_parts)
+                    result.append((sel_text, current_parts[-1]))
+                    current_parts = []
+            else:
+                current_parts.append(child)
+        if current_parts:
+            sel_text = self._normalize_selector_text(current_parts)
+            result.append((sel_text, current_parts[-1]))
+        return result
+
+    @staticmethod
+    def _normalize_selector_text(parts: list) -> str:
+        """Build normalized selector text from AST node parts."""
+        texts = []
+        for part in parts:
+            raw = part.text.decode("utf-8", errors="replace").strip()
+            raw = re.sub(r"\s+", " ", raw)
+            texts.append(raw)
+        return " ".join(texts)
+
+    @staticmethod
+    def _extract_css_import(node) -> Optional[str]:
+        """Extract the import target from a CSS @import statement."""
+        for child in node.children:
+            if child.type == "string_value":
+                raw = child.text.decode("utf-8", errors="replace")
+                return raw.strip("'\"")
+            if child.type == "call_expression":
+                # url('path')
+                for sub in child.children:
+                    if sub.type == "arguments":
+                        for arg in sub.children:
+                            if arg.type == "string_value":
+                                raw = arg.text.decode("utf-8", errors="replace")
+                                return raw.strip("'\"")
+        return None
+
+    @staticmethod
+    def _get_css_media_text(node) -> str:
+        """Extract normalized media query text from a media_statement node."""
+        parts = []
+        for child in node.children:
+            if child.type in ("feature_query", "keyword_query", "binary_query"):
+                raw = child.text.decode("utf-8", errors="replace")
+                parts.append(re.sub(r"\s+", "", raw))
+        return ",".join(parts) if parts else "unknown"
+
+    @staticmethod
+    def _get_css_property_name(decl_node) -> Optional[str]:
+        """Extract property name from a CSS declaration node."""
+        for child in decl_node.children:
+            if child.type == "property_name":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type == "variable_name":
+                return child.text.decode("utf-8", errors="replace")
+        return None
+
+    @staticmethod
+    def _find_var_refs(decl_node) -> list[str]:
+        """Find all var(--name) references in a declaration value."""
+        refs: list[str] = []
+        stack = list(decl_node.children)
+        while stack:
+            n = stack.pop()
+            if n.type == "call_expression":
+                fn_name = None
+                for child in n.children:
+                    if child.type == "function_name":
+                        fn_name = child.text.decode("utf-8", errors="replace")
+                    elif child.type == "arguments" and fn_name == "var":
+                        for arg in child.children:
+                            if arg.type in ("plain_value", "identifier"):
+                                val = arg.text.decode("utf-8", errors="replace")
+                                if val.startswith("--"):
+                                    refs.append(val)
+            for child in n.children:
+                stack.append(child)
+        return refs
+
+    @staticmethod
+    def _has_important(decl_node) -> bool:
+        """Check if a CSS declaration has !important."""
+        stack = list(decl_node.children)
+        while stack:
+            n = stack.pop()
+            if n.type == "important":
+                return True
+            for child in n.children:
+                stack.append(child)
+        return False
 
     def _resolve_call_targets(
         self,
@@ -908,7 +1608,7 @@ class CodeParser:
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
-                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue"]
+                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".scss"]
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
@@ -923,6 +1623,23 @@ class CodeParser:
                         target = base / f"index{ext}"
                         if target.is_file():
                             return str(target.resolve())
+
+        elif language in ("css", "scss"):
+            if module.startswith(".") or module.startswith("/"):
+                base = caller_dir / module
+                extensions = [".css", ".scss"]
+                if base.is_file():
+                    return str(base.resolve())
+                for ext in extensions:
+                    target = base.with_suffix(ext)
+                    if target.is_file():
+                        return str(target.resolve())
+                # SCSS partial: _filename.scss
+                base_name = base.name
+                for ext in extensions:
+                    partial = base.parent / f"_{base_name}{ext}"
+                    if partial.is_file():
+                        return str(partial.resolve())
 
         return None
 
