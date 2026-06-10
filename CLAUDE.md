@@ -16,6 +16,7 @@ When using code-review-graph MCP tools, follow these rules:
 
 - **Core Package**: `code_review_graph/` (Python 3.10+)
   - `parser.py` — Tree-sitter multi-language AST parser plus targeted fallbacks for broad source-language and notebook support
+  - `custom_languages.py` — Config-driven custom language support (`.code-review-graph/languages.toml`, see docs/CUSTOM_LANGUAGES.md)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
   - `tools/` — 30 MCP tool implementations split by domain
   - `main.py` — FastMCP server entry point, registers 30 tools + 5 prompts
@@ -90,6 +91,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_visualization.py` — Export, HTML generation, C++ resolution
 - `tests/test_incremental.py` — Build, update, migration, git ops
 - `tests/test_multilang.py` — Broad language parsing tests, including SFCs, notebooks, SQL, Perl XS, and modern systems/web languages
+- `tests/test_custom_languages.py` — Config-driven custom languages (languages.toml loader + end-to-end Erlang parse)
 - `tests/test_embeddings.py` — Vector encode/decode, similarity, store
 - `tests/test_flows.py` — Execution flow detection and criticality
 - `tests/test_communities.py` — Community detection, architecture overview

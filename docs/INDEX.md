@@ -3,6 +3,7 @@
 - [USAGE.md](USAGE.md) -- How to install and use
 - [FEATURES.md](FEATURES.md) -- What's included, changelog
 - [COMMANDS.md](COMMANDS.md) -- All 30 MCP tools, 5 MCP prompts, skills, and CLI commands
+- [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md) -- Bring your own language via `.code-review-graph/languages.toml`
 - [LLM-OPTIMIZED-REFERENCE.md](LLM-OPTIMIZED-REFERENCE.md) -- Token-optimized reference for MCP-capable AI coding agents
 - [architecture.md](architecture.md) -- System design and data flow
 - [schema.md](schema.md) -- Graph node/edge schema, SQLite tables (including flows, communities, FTS5)
