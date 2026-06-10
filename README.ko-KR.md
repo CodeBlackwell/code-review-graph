@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+> **참고:** 이 번역은 이전 릴리스를 기준으로 합니다. 벤치마크 수치와 플랫폼 목록은 [영문 README](README.md)보다 오래되었을 수 있습니다.
+
 <p align="center">
   <strong>토큰 낭비를 멈추세요. 더 스마트하게 리뷰하세요.</strong>
 </p>

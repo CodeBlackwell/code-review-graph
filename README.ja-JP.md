@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+> **注意:** この翻訳は古いリリースに基づいています。ベンチマーク数値や対応プラットフォームの一覧は[英語版 README](README.md)より古い場合があります。
+
 <p align="center">
   <strong>トークンの無駄遣いをやめて、スマートなレビューを。</strong>
 </p>

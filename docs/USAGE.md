@@ -51,7 +51,7 @@ Parses your entire codebase. Takes ~10s for 500 files.
 ```
 /code-review-graph:review-delta
 ```
-Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata; the current evaluation sample averages 8.2x context reduction versus naive full-context review.
+Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use 38x–528x fewer tokens per question than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
 
 ### 3. Review a PR
 ```
